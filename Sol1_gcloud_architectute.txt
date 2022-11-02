@@ -1,0 +1,179 @@
+Details of creating the Infrastructure using gcloud cli 
+============================================================
+
+Stage 1 : Create the Gcloud Enviroment :
+=========================================================
+
+1. Download and install gcloud CLI in the local system
+   >> curl -O https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-407.0.0-linux-x86_64.tar.gz
+
+2. Untar and install gcloud 
+
+3. Initialize the gcloud 
+>> gcloud init // Initialize, authorize, and configure the gcloud CLI.
+>> gcloud auth login  // ** We need this account a login/passwd 
+
+
+4. Create a Project and set a region for the project and Billing API Enable 
+
+Create Admin User Service Account creation 
+Go to the projects portal and create a service account and download the keys for the service account 
+
+
+
+
+
+5. Activate the service account using the gcloud 
+>> gcloud auth activate-service-account SERVICE_ACCOUNT@DOMAIN.COM --key-file=/path/key.json --project=PROJECT_ID
+Attach Roles to the service account 
+
+>> gcloud projects add-iam-policy-binding ${GCP_PROJECT_ID} \ --member=serviceAccount:${GCP_SVC_ACC}  --role=roles/compute.admin --role=roles/storage..admin, --role= roles/cloud sql.admin,  
+
+Stage 2 : Create the network and Firewalls :
+==============================
+Virtual Private Cloud (VPC) network 
+------------------------------------
+
+1)  Name to  network.
+>> gcloud compute networks create Threetiernetwoek \
+    --subnet-mode=custom \
+    --bgp-routing-mode=Dynamic \
+    --mtu=MTU
+
+2 ) For Subnet creation mode, . (Auto mode networks create subnets in each region automatically)
+
+>> gcloud compute networks subnets create PrivateSubnet \
+    --network= Threetiernetwoek \ 
+    --range=10.0.0.0/8\
+    --region=us-central1a
+>> gcloud compute networks subnets create PublicSubnet \
+    --network= Threetiernetwoek \ 
+    --range=192.168.2.10/8\
+    --region=us-central1a
+3) Add the Routes 
+gcloud compute routes create pub_pvt \
+    --destination-range= 192.168.2.10/8\
+    --network=PrivateSubnet \
+  
+gcloud compute routes create pub_pvt \
+    --destination-range= 10.0.0.0/8\
+    --network=PublicSubnet \
+
+
+4) For VPC Firewall rules, check all available rules. (These are the same standard firewall rules that the default network had)
+Ingress : Allow: 0.0.0.0/3000
+Egress : Allow 0.0.0.0/0
+.
+>> gcloud compute firewall-rules create "Public-http-rule" --allow=http:3000 --source-ranges="192.168.2.10/8" --description="Narrowing TCP traffic"
+
+>> gcloud compute firewall-rules create "Private-http-rule" --allow=http:3000 --source-ranges="10.0.0.0/8" --description="Narrowing TCP traffic"
+
+
+Stage 3: Creation of Scalable Instance groups for Front end and Backend :
+==========================================================================
+1. Create the Compute instance templates for the front end 
+> gcloud compute instance-templates create FE_instance_templ \
+    --machine-type=e2-standard-4 \
+    --image-family=debian-10 \
+    --image-project=debian-cloud \
+    --boot-disk-size=50GB
+    – network = PublicSubnet
+
+
+> gcloud compute instance-templates create BE_instance_templ \
+    --machine-type=e2-med-64 \
+    --image-family=debian-10 \
+    --image-project=debian-cloud \
+    --boot-disk-size=200GB
+    – network = PrivateSubnet
+
+
+
+2. Create instance groups for frontend and backend:
+For the frond end 
+
+> gcloud compute instance-groups managed create frontend-managed-instance-group --zone us-central1-a --template FE_instance_templ  --size 10 --health-check=  http-basic-check 
+
+Instance group, define an HTTP service and map a port name to the relevant port. The load balancing service forwards traffic to the named port.
+
+
+> gcloud compute instance-groups set-named-ports frontend-managed-instance-group \
+    --named-ports http:80 \
+    --zone us-central1
+
+3. For Baceknd Managed instance groups 
+> gcloud compute instance-groups managed create backendend-managed-instance-group --zone us-central1-a --template BE_instance_templ  --size 10 --health-check= http-basic-check 
+
+> gcloud compute instance-groups set-named-ports frontend-managed-instance-group \
+    --named-ports http:80 \
+    --zone us-central1a-b
+
+4. Create External Load Balancers and set the backend targets as the FE instance groups in public network 
+> gcloud compute health-checks create http http-basic-check \
+      --port 80
+> gcloud compute backend-services create web-backend-service \
+      --load-balancing-scheme=EXTERNAL \
+      --protocol=HTTP \
+      --port-name=http \
+      --health-checks=http-basic-check \
+      --global
+
+
+
+Stage 4: Creation of External and Internal Load balancers:
+================================================================
+
+1.Add your instance group as the backend to the backend service.
+
+>  gcloud compute backend-services add-backend web-backend-service \
+      --instance-group=backendend-managed-instance-group \
+      --instance-group-zone=us-central1a \
+      --global
+
+For HTTP, create a URL map to route the incoming requests to the default backend service.
+
+2. Create backend service 
+> gcloud compute url-maps create web-map-http \
+      --default-service web-backend-service
+
+3, Setting up an HTTP frontend proxy using the service 
+> For HTTP, create a target HTTP proxy to route requests to your URL map.
+ gcloud compute target-http-proxies create http-lb-proxy \
+      --url-map=web-map-http
+
+4. For HTTP, create a global forwarding rule to route incoming requests to the proxy
+> gcloud compute forwarding-rules create http-content-rule \
+      --load-balancing-scheme=EXTERNAL \
+      --address=lb-ipv4-1 \
+      --global \
+      --target-http-proxy=http-lb-proxy \
+      --ports=80
+
+
+5. Create internal load balancer and associated backend targets for 
+HEALTH CHECKS
+> gcloud compute health-checks create http l7-ilb-basic-check \
+   --region=us-cental-1a\
+   --use-serving-port
+
+6. Create the Internal Load balancer 
+>gcloud compute backend-services create l7-ilb-backend-service \
+  --load-balancing-scheme=INTERNAL_MANAGED \
+  --protocol=HTTP \
+  --health-checks=l7-ilb-basic-check \
+  --health-checks-region=us-central1 \
+  --region=us-central1
+
+7. Set up the service with the instance group
+> gcloud compute backend-services add-backend backendend-managed-instance-group \
+  --balancing-mode=UTILIZATION \
+  --instance-group=backendend-managed-instance-group \
+  --instance-group-zone=us-central1-a \
+  --region=us-west1
+
+Stage 5: Creating a Cloud PAAS DB (Cloud SQL to be used by the LBs)
+======================================================================
+1. Create the database :
+The gcloud sql instance thats been create dwhich will be only accesed by our Backend instances 
+> gcloud sql instances create prod-instance --database-version=SQLSERVER_2017_EXPRESS --cpu=2 --memory=3840MiB --zone=us-central1-a --root-password=password123
+--authorized-networks=10.0.0.0/8
